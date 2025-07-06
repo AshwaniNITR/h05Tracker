@@ -53,6 +53,7 @@ export default function SyncParticipants() {
             }
 
             const resetData = await resetResponse.json();
+            console.log(resetData);
             addLog('✅ Sync state reset successfully', 'success');
 
             // Step 2: Start sync
