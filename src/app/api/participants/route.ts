@@ -1,9 +1,9 @@
 import { NextResponse } from 'next/server';
 import dbConnect from '@/lib/db';
-import Participant from '@/models/Participant';
+import { Participant, SyncState } from '@/models/Participant';
 
 const headers = {
-    'cookie': process.env.DEVFOLIO_COOKIE || 'your-cookie-here', // Ensure this matches your Express cookie
+    'cookie': process.env.DEVFOLIO_COOKIE || 'your-cookie-here',
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
     'Accept': 'application/json'
 };
@@ -25,6 +25,13 @@ type DevfolioExtras = {
     user_hackathon_extras?: { value: string }[];
 };
 
+// Add a SyncState model to track progress
+type SyncState = {
+    lastProcessedIndex: number;
+    lastSyncTime: Date;
+    totalParticipants: number;
+};
+
 async function fetchUserExtras(username: string) {
     try {
         const params = new URLSearchParams({
@@ -38,7 +45,7 @@ async function fetchUserExtras(username: string) {
 
         const res = await fetch(`https://api.devfolio.co/api/hackathons/hackodisha-4/participants/${username}?${params}`, { 
             headers,
-            next: { revalidate: 60 } // Cache for 60 seconds
+            next: { revalidate: 60 }
         });
 
         if (!res.ok) throw new Error(`API request failed with status ${res.status}`);
@@ -51,7 +58,7 @@ async function fetchUserExtras(username: string) {
             email: data.email,
             name: `${data.first_name ?? ''} ${data.last_name ?? ''}`.trim(),
             hackathon_extras: extraValues,
-            updatedAt: new Date()
+            lastUpdated: new Date()
         };
     } catch (err) {
         console.error(`❌ Error for ${username}:`, err);
@@ -59,14 +66,96 @@ async function fetchUserExtras(username: string) {
     }
 }
 
+type SyncStateData = {
+    lastProcessedIndex: number;
+    lastSyncTime: Date;
+    totalParticipants: number;
+    isActive: boolean;
+    batchSize: number;
+};
+
+async function getSyncState(): Promise<SyncStateData> {
+    const hackathonId = 'hackodisha-4';
+    try {
+        const state = await SyncState.findOne({ hackathonId });
+        if (state) {
+            return {
+                lastProcessedIndex: state.lastProcessedIndex || 0,
+                lastSyncTime: state.lastSyncTime || new Date(0),
+                totalParticipants: state.totalParticipants || 0,
+                isActive: state.isActive || false,
+                batchSize: state.batchSize || 10
+            };
+        }
+    } catch (err) {
+        console.log('No sync state found, starting fresh', err);
+    }
+    
+    return {
+        lastProcessedIndex: 0,
+        lastSyncTime: new Date(0),
+        totalParticipants: 0,
+        isActive: false,
+        batchSize: 10
+    };
+}
+
+async function updateSyncState(state: SyncStateData) {
+    const hackathonId = 'hackodisha-4';
+    try {
+        await SyncState.findOneAndUpdate(
+            { hackathonId },
+            { 
+                $set: {
+                    lastProcessedIndex: state.lastProcessedIndex,
+                    lastSyncTime: state.lastSyncTime,
+                    totalParticipants: state.totalParticipants,
+                    isActive: state.isActive,
+                    batchSize: state.batchSize
+                }
+            },
+            { upsert: true }
+        );
+    } catch (err) {
+        console.error('Failed to update sync state:', err);
+    }
+}
+
 export async function GET() {
     await dbConnect();
 
     try {
-        const allParticipants = [];
+        // Get current sync state
+        const syncState = await getSyncState();
+        
+        // Check if sync is already active (prevent concurrent syncs)
+        if (syncState.isActive) {
+            // Check if the sync has been active for too long (e.g., 30 minutes)
+            const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+            
+            if (syncState.lastSyncTime < thirtyMinutesAgo) {
+                console.log('⚠️ Sync was stuck in active state, resetting...');
+                // Reset the stuck sync
+                await updateSyncState({ ...syncState, isActive: false });
+            } else {
+                return NextResponse.json({
+                    success: false,
+                    message: 'Sync already in progress',
+                    lastSyncTime: syncState.lastSyncTime,
+                    timestamp: new Date().toISOString()
+                }, { status: 409 });
+            }
+        }
+        
+        // Mark sync as active
+        await updateSyncState({ ...syncState, isActive: true });
+        
+        console.log(`📊 Starting sync from index: ${syncState.lastProcessedIndex}`);
+
+        // First, fetch ALL participants to get the complete list
+        const allParticipantsFromAPI = [];
         let page = 1;
         const limit = 200;
-        let totalProcessed = 0;
 
         while (true) {
             const params = new URLSearchParams({
@@ -74,74 +163,149 @@ export async function GET() {
                 page: page.toString(),
                 order: 'DESC',
                 role: 'hacker',
-                status: 'submit', // Changed to match Express version
+                status: 'submit',
                 user: 'eyJzdGF0dXMiOiJhY3RpdmUifQ%3D%3D'
             });
 
             const response = await fetch(`https://api.devfolio.co/api/hackathons/hackodisha-4/participants?${params}`, { 
                 headers,
-                next: { revalidate: 60 } // Cache for 60 seconds
+                cache: 'no-store'
             });
-
-            if (!response.ok) {
-                throw new Error(`API request failed with status ${response.status}`);
-            }
 
             const data: { result: DevfolioParticipant[] } = await response.json();
             const participants = data.result;
-            
-            if (!participants || participants.length === 0) break;
+            if (!participants.length) break;
 
-            // Process participants in parallel for better performance
-            const processingPromises = participants.map(async (p) => {
-                const username = p?.user?.username;
-                if (!username) return null;
-
-                // Check if participant exists in DB
-                const exists = await Participant.findOne({ username });
-                if (exists) return null;
-
-                const info = await fetchUserExtras(username);
-                if (!info) return null;
-
-                // Upsert to MongoDB (update if exists, insert if not)
-                await Participant.findOneAndUpdate(
-                    { username },
-                    { $set: info },
-                    { upsert: true, new: true }
-                );
-
-                return info;
-            });
-
-            const results = await Promise.all(processingPromises);
-            const successfulAdds = results.filter(Boolean);
-            allParticipants.push(...successfulAdds);
-            totalProcessed += successfulAdds.length;
-
-            console.log(`Processed page ${page}: ${successfulAdds.length} new participants`);
-            
+            allParticipantsFromAPI.push(...participants);
             page++;
-
-            // Safety break to prevent infinite loops
-            if (page > 20) break;
         }
 
-        const totalInDB = await Participant.countDocuments();
+        console.log(`📥 Fetched ${allParticipantsFromAPI.length} total participants from API`);
 
-        return NextResponse.json({ 
-            success: true,
-            newParticipants: allParticipants.length,
-            totalProcessed,
-            totalInDB,
-            participants: allParticipants.slice(0, 10) // Sample of first 10 for verification
+        // Determine which users need to be processed
+        let usersToProcess = [];
+        
+        // Check if this is a fresh start or continuation
+        if (syncState.lastProcessedIndex === 0) {
+            // Fresh start - process all users
+            usersToProcess = allParticipantsFromAPI;
+            console.log(`🔄 Fresh sync - processing all ${usersToProcess.length} users`);
+        } else {
+            // Continuation - check if new users were added
+            const totalCurrentUsers = allParticipantsFromAPI.length;
+            
+            if (totalCurrentUsers > syncState.totalParticipants) {
+                // New users added - process only the new ones
+                usersToProcess = allParticipantsFromAPI.slice(syncState.lastProcessedIndex);
+                console.log(`➕ Found ${usersToProcess.length} new users to process`);
+            } else if (totalCurrentUsers === syncState.totalParticipants) {
+                // No new users - check if we need to continue from where we left off
+                if (syncState.lastProcessedIndex < totalCurrentUsers) {
+                    usersToProcess = allParticipantsFromAPI.slice(syncState.lastProcessedIndex);
+                    console.log(`⏭️ Continuing from index ${syncState.lastProcessedIndex} - ${usersToProcess.length} users remaining`);
+                } else {
+                    console.log(`✅ All users already processed - no work needed`);
+                    return NextResponse.json({
+                        success: true,
+                        message: 'All participants already synchronized',
+                        totalParticipants: totalCurrentUsers,
+                        lastProcessedIndex: syncState.lastProcessedIndex,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            } else {
+                // Total users decreased (rare case) - start fresh
+                usersToProcess = allParticipantsFromAPI;
+                syncState.lastProcessedIndex = 0;
+                console.log(`🔄 User count decreased - starting fresh sync`);
+            }
+        }
+
+        // Process users in batches to avoid overwhelming the API
+        const batchSize = syncState.batchSize || 10;
+        const processedUsers = [];
+        let currentIndex = syncState.lastProcessedIndex;
+        
+        for (let i = 0; i < usersToProcess.length; i += batchSize) {
+            const batch = usersToProcess.slice(i, i + batchSize);
+            console.log(`🔄 Processing batch ${Math.floor(i/batchSize) + 1}/${Math.ceil(usersToProcess.length/batchSize)}`);
+            
+            const batchResults = await Promise.all(
+                batch.map(async (p) => {
+                    const username = p.user?.username;
+                    if (!username) return null;
+
+                    const info = await fetchUserExtras(username);
+                    if (!info) return null;
+
+                    await Participant.findOneAndUpdate(
+                        { username },
+                        { $set: info },
+                        { upsert: true }
+                    );
+
+                    return info;
+                })
+            );
+
+            const validResults = batchResults.filter(Boolean);
+            processedUsers.push(...validResults);
+            
+            // Update current index
+            currentIndex += batch.length;
+            
+            // Update sync state after each batch
+            await updateSyncState({
+                lastProcessedIndex: currentIndex,
+                lastSyncTime: new Date(),
+                totalParticipants: allParticipantsFromAPI.length,
+                isActive: true,
+                batchSize: syncState.batchSize
+            });
+            
+            console.log(`✅ Processed batch - new index: ${currentIndex}`);
+            
+            // Small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 100));
+        }
+
+        console.log(`🎉 Sync completed - processed ${processedUsers.length} users`);
+
+        // Mark sync as completed
+        await updateSyncState({
+            lastProcessedIndex: currentIndex,
+            lastSyncTime: new Date(),
+            totalParticipants: allParticipantsFromAPI.length,
+            isActive: false,
+            batchSize: syncState.batchSize
         });
+
+        return NextResponse.json({
+            success: true,
+            count: processedUsers.length,
+            totalParticipants: allParticipantsFromAPI.length,
+            lastProcessedIndex: currentIndex,
+            participants: processedUsers,
+            timestamp: new Date().toISOString()
+        });
+
     } catch (err) {
-        console.error('❌ Main fetch error:', err);
-        return NextResponse.json({ 
-            error: 'Failed to fetch participants.',
-            message: err instanceof Error ? err.message : 'Unknown error',
-            stack: process.env.NODE_ENV === 'development' ? (err instanceof Error ? err.stack : undefined) : undefined
-        }, { status: 500 });
+        console.error('❌ Sync error:', err);
+        
+        // Mark sync as inactive on error
+        try {
+            const currentState = await getSyncState();
+            await updateSyncState({ ...currentState, isActive: false });
+        } catch (updateErr) {
+            console.error('Failed to update sync state after error:', updateErr);
+        }
+        
+        return NextResponse.json(
+            { 
+                error: 'Failed to fetch', 
+                details: err instanceof Error ? err.message : String(err) 
+            },
+            { status: 500 }
+        );
     }
 }

@@ -61,7 +61,7 @@ export default function Results({ participants, searchTerm }: ResultsProps) {
                             <div className="truncate">Image attachment</div>
                             <div className="absolute hidden group-hover:block z-10 mt-1 w-64 bg-white p-2 rounded shadow-lg border">
                               <img 
-                                src={`https://api.devfolio.co/${extra}`} 
+                                src={`https://devfolio-prod.s3.ap-south-1.amazonaws.com/${extra}`} 
                                 alt="Hackathon extra" 
                                 className="max-w-full h-auto rounded"
                                 onError={(e) => {
