@@ -60,7 +60,7 @@ export default function Home() {
         <h1 className="text-3xl text-blue-600 font-bold text-center mb-2">Hackodisha Participants</h1>
         <p className="text-center text-gray-600 mb-8">Browse all registered participants</p>
         
-        <SearchBar 
+        {/* <SearchBar 
           searchTerm={searchTerm} 
           setSearchTerm={setSearchTerm} 
           onSearch={handleSearch}
@@ -70,7 +70,25 @@ export default function Home() {
           <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
             {error}
           </div>
-        )}
+        )} */}
+        <SearchBar 
+          searchTerm={searchTerm} 
+          setSearchTerm={setSearchTerm} 
+          onSearch={handleSearch}
+        />
+
+    {error && (
+      <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+        {error}
+      </div>
+    )}
+
+    {!error && (
+      <p className="text-center text-gray-700 mb-4">
+        Total Participants: {pagination.total}
+      </p>
+    )}
+
 
         {isLoading ? (
           <div className="text-center py-12">
