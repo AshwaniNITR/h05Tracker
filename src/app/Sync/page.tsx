@@ -1,8 +1,10 @@
 "use client";
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { RefreshCw, Users, Clock, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
 
 export default function SyncParticipants() {
+    const router = useRouter();
     const [isLoading, setIsLoading] = useState(false);
     const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -51,7 +53,6 @@ export default function SyncParticipants() {
             }
 
             const resetData = await resetResponse.json();
-            console.log('Reset response:', resetData);
             addLog('✅ Sync state reset successfully', 'success');
 
             // Step 2: Start sync
@@ -75,6 +76,11 @@ export default function SyncParticipants() {
                 addLog(`📊 Processed ${syncData.count} participants`, 'success');
                 addLog(`📈 Total participants: ${syncData.totalParticipants}`, 'info');
                 addLog(`📍 Last processed index: ${syncData.lastProcessedIndex}`, 'info');
+                
+                // Redirect to home page after successful sync
+                setTimeout(() => {
+                    router.push('/');
+                }, 2000); // Wait 2 seconds before redirect
             } else {
                 throw new Error(syncData.message || 'Sync failed');
             }
@@ -226,7 +232,18 @@ export default function SyncParticipants() {
                         </div>
                     </div>
                 </div>
-            )}           
+            )}
+
+            {/* Instructions */}
+            {/* <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <h3 className="font-medium text-blue-800 mb-2">How it works:</h3>
+                <ul className="text-blue-700 text-sm space-y-1">
+                    <li>1. Resets any stuck sync state</li>
+                    <li>2. Fetches all participants from Devfolio</li>
+                    <li>3. Only processes new/unprocessed participants</li>
+                    <li>4. Updates database with latest participant data</li>
+                </ul>
+            </div> */}
             </div>
         </div>
     );
