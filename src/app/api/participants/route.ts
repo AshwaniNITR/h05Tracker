@@ -237,6 +237,7 @@ async function processParticipants(
                 );
                 processedCount++;
             } catch (err) {
+                console.error(`❌ Error processing participant ${username}:`, err);
                 failedCount++;
                 failedUsernames.push(username);
             }

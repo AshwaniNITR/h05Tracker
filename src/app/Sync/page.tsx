@@ -1,7 +1,7 @@
 "use client";
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { RefreshCw, Users, Clock, CheckCircle, XCircle, AlertCircle, RotateCcw, Database } from 'lucide-react';
+import { RefreshCw, Users, Clock, CheckCircle, XCircle,  RotateCcw, Database } from 'lucide-react';
 
 export default function SyncParticipants() {
     const router = useRouter();
@@ -43,7 +43,9 @@ export default function SyncParticipants() {
             addLog(`🔄 Starting ${syncType === 'incremental' ? 'incremental' : 'full'} sync...`, 'info');
             
             const endpoint = syncType === 'full' ? '/api/reset' : '/api/participants';
+            console.log(endpoint);
             const method = syncType === 'full' ? 'POST' : 'GET';
+            console.log(method);
 
             // For full sync, first reset then sync
             if (syncType === 'full') {
@@ -60,6 +62,7 @@ export default function SyncParticipants() {
                 }
 
                 const resetData = await resetResponse.json();
+                console.log(resetData);
                 addLog('✅ Sync state reset successfully', 'success');
             }
 
