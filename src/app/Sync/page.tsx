@@ -1,7 +1,7 @@
 "use client";
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { RefreshCw, Users, Clock, CheckCircle, XCircle, AlertCircle, RotateCcw } from 'lucide-react';
+import { RefreshCw, Users, Clock, CheckCircle, XCircle, AlertCircle, RotateCcw, Database } from 'lucide-react';
 
 export default function SyncParticipants() {
     const router = useRouter();
@@ -17,22 +17,15 @@ export default function SyncParticipants() {
     }
 
     interface SyncStatus {
-        success: boolean;
-        syncType: string;
-        count: number;
-        newParticipants: number;
-        updatedParticipants: number;
-        skippedParticipants: number;
-        failedParticipants: number;
+        processed: number;
+        failed: number;
         failedUsernames: string[];
         totalParticipants: number;
-        lastProcessedIndex: number;
-        initialDBCount: number;
-        finalDBCount: number;
-        progress: string;
-        isComplete: boolean;
-        timestamp: string;
-        message?: string;
+        message: string;
+        syncType?: 'INITIAL_SYNC' | 'UPDATE_CHECK' | 'MISSING_PARTICIPANTS' | 'RESYNC';
+        dbCount?: number;
+        apiCount?: number;
+        newParticipants?: number;
     }
 
     const addLog = (message: string, type: LogEntry['type'] = 'info') => {
@@ -40,16 +33,38 @@ export default function SyncParticipants() {
         setLogs((prev: LogEntry[]) => [...prev, { message, type, timestamp }]);
     };
 
-    const incrementalSync = async () => {
+    const startSync = async (syncType: 'incremental' | 'full') => {
         setIsLoading(true);
         setError(null);
         setSyncStatus(null);
         setLogs([]);
 
         try {
-            addLog('🔄 Starting incremental sync...', 'info');
+            addLog(`🔄 Starting ${syncType === 'incremental' ? 'incremental' : 'full'} sync...`, 'info');
             
-            // Direct sync without reset - let backend handle incremental logic
+            const endpoint = syncType === 'full' ? '/api/reset' : '/api/participants';
+            const method = syncType === 'full' ? 'POST' : 'GET';
+
+            // For full sync, first reset then sync
+            if (syncType === 'full') {
+                addLog('♻️ Resetting sync state...', 'info');
+                const resetResponse = await fetch('/api/reset', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                if (!resetResponse.ok) {
+                    throw new Error(`Reset failed: ${resetResponse.status}`);
+                }
+
+                const resetData = await resetResponse.json();
+                addLog('✅ Sync state reset successfully', 'success');
+            }
+
+            // Perform the sync
+            addLog('📡 Fetching participants data...', 'info');
             const syncResponse = await fetch('/api/participants', {
                 method: 'GET',
                 headers: {
@@ -63,117 +78,44 @@ export default function SyncParticipants() {
 
             const syncData = await syncResponse.json();
             
-            if (syncData.success) {
-                setSyncStatus(syncData);
-                
-                // Log sync type and results
-                addLog(`📊 Sync Type: ${syncData.syncType}`, 'info');
-                
-                if (syncData.count > 0) {
-                    addLog(`🎉 Sync completed successfully!`, 'success');
-                    addLog(`📊 Total processed: ${syncData.count} participants`, 'success');
-                    
-                    if (syncData.newParticipants > 0) {
-                        addLog(`🆕 New participants: ${syncData.newParticipants}`, 'success');
-                    }
-                    
-                    if (syncData.updatedParticipants > 0) {
-                        addLog(`🔄 Updated participants: ${syncData.updatedParticipants}`, 'success');
-                    }
-                    
-                    if (syncData.skippedParticipants > 0) {
-                        addLog(`⏭️ Skipped participants: ${syncData.skippedParticipants}`, 'warning');
-                    }
-                    
-                    if (syncData.failedParticipants > 0) {
-                        addLog(`❌ Failed participants: ${syncData.failedParticipants}`, 'error');
-                        if (syncData.failedUsernames && syncData.failedUsernames.length > 0) {
-                            addLog(`Failed usernames: ${syncData.failedUsernames.join(', ')}`, 'error');
-                        }
-                    }
-                } else {
-                    addLog(`✅ Database is already in sync!`, 'success');
-                }
-                
-                addLog(`📈 Total participants: ${syncData.totalParticipants}`, 'info');
-                addLog(`📊 Database count: ${syncData.initialDBCount} → ${syncData.finalDBCount}`, 'info');
-                addLog(`📍 Progress: ${syncData.progress}`, 'info');
-                addLog(`🔄 Sync ${syncData.isComplete ? 'completed' : 'in progress'}`, syncData.isComplete ? 'success' : 'warning');
-                
-                // Only redirect if sync is complete and successful
-                if (syncData.isComplete && syncData.count > 0) {
-                    setTimeout(() => {
-                        router.push('/');
-                    }, 3000); // Wait 3 seconds before redirect
-                }
-            } else {
-                throw new Error(syncData.message || 'Sync failed');
+            if (syncData.error) {
+                throw new Error(syncData.error);
             }
 
-        } catch (err) {
-            console.error('Sync error:', err);
-            const errorMessage = err instanceof Error ? err.message : String(err);
-            setError(errorMessage);
-            addLog(`❌ Error: ${errorMessage}`, 'error');
-        } finally {
-            setIsLoading(false);
-        }
-    };
-
-    const resetAndSync = async () => {
-        setIsLoading(true);
-        setError(null);
-        setSyncStatus(null);
-        setLogs([]);
-
-        try {
-            addLog('🔄 Starting full reset and sync...', 'info');
-            
-            // Step 1: Reset sync state
-            addLog('📋 Resetting sync state...', 'info');
-            const resetResponse = await fetch('/api/reset', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
+            // Handle successful sync
+            setSyncStatus({
+                processed: syncData.processed || 0,
+                failed: syncData.failed || 0,
+                failedUsernames: syncData.failedUsernames || [],
+                totalParticipants: syncData.totalParticipants || 0,
+                message: syncData.message || 'Sync completed',
+                syncType: syncData.syncType,
+                dbCount: syncData.dbCount,
+                apiCount: syncData.apiCount,
+                newParticipants: syncData.newParticipants
             });
 
-            if (!resetResponse.ok) {
-                throw new Error(`Reset failed: ${resetResponse.status}`);
-            }
-
-            const resetData = await resetResponse.json();
-            console.log(resetData);
-            addLog('✅ Sync state reset successfully', 'success');
-
-            // Step 2: Start full sync
-            addLog('🚀 Starting full participant sync...', 'info');
-            const syncResponse = await fetch('/api/participants', {
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-            });
-
-            if (!syncResponse.ok) {
-                throw new Error(`Sync failed: ${syncResponse.status}`);
-            }
-
-            const syncData = await syncResponse.json();
+            // Add logs based on sync results
+            addLog(`🎉 ${syncData.message}`, 'success');
+            addLog(`📊 Total participants in API: ${syncData.apiCount || 'unknown'}`, 'info');
+            addLog(`💾 Current database count: ${syncData.dbCount || 'unknown'}`, 'info');
             
-            if (syncData.success) {
-                setSyncStatus(syncData);
-                addLog(`🎉 Full sync completed successfully!`, 'success');
-                addLog(`📊 Processed ${syncData.count} participants`, 'success');
-                addLog(`📈 Total participants: ${syncData.totalParticipants}`, 'info');
-                addLog(`📍 Progress: ${syncData.progress}`, 'info');
-                
-                // Redirect to home page after successful sync
+            if (syncData.processed > 0) {
+                addLog(`✅ Processed: ${syncData.processed} participants`, 'success');
+            }
+            
+            if (syncData.failed > 0) {
+                addLog(`❌ Failed: ${syncData.failed} participants`, 'error');
+                if (syncData.failedUsernames?.length > 0) {
+                    addLog(`⚠️ Failed usernames: ${syncData.failedUsernames.join(', ')}`, 'warning');
+                }
+            }
+
+            // Redirect if significant changes were made
+            if (syncData.processed > 0) {
                 setTimeout(() => {
                     router.push('/');
-                }, 2000);
-            } else {
-                throw new Error(syncData.message || 'Sync failed');
+                }, 3000);
             }
 
         } catch (err) {
@@ -202,15 +144,13 @@ export default function SyncParticipants() {
         }
     };
 
-    const getSyncTypeDisplay = (syncType: string) => {
+    const getSyncTypeDisplay = (syncType?: string) => {
         switch (syncType) {
-            case 'NO_CHANGES': return 'No Changes';
-            case 'NEW_PARTICIPANTS': return 'New Participants';
-            case 'CONTINUE_SYNC': return 'Continue Sync';
-            case 'MISSING_PARTICIPANTS': return 'Missing Participants';
+            case 'INITIAL_SYNC': return 'Initial Sync';
             case 'UPDATE_CHECK': return 'Update Check';
-            case 'FULL_RESYNC': return 'Full Resync';
-            default: return syncType;
+            case 'MISSING_PARTICIPANTS': return 'Missing Participants';
+            case 'RESYNC': return 'Full Resync';
+            default: return syncType || 'Not specified';
         }
     };
 
@@ -220,17 +160,17 @@ export default function SyncParticipants() {
                 <div className="mb-6">
                     <h2 className="text-2xl font-bold text-gray-800 mb-2 flex items-center gap-2">
                         <Users className="text-blue-600" />
-                        Participant Sync
+                        Participant Sync Dashboard
                     </h2>
                     <p className="text-gray-600">
-                        Smart sync with incremental updates. Only processes new or changed participants.
+                        Synchronize participant data between Devfolio API and local database
                     </p>
                 </div>
 
                 {/* Sync Buttons */}
-                <div className="mb-6 flex gap-3">
+                <div className="mb-6 flex gap-3 flex-wrap">
                     <button
-                        onClick={incrementalSync}
+                        onClick={() => startSync('incremental')}
                         disabled={isLoading}
                         className={`
                             flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition-all
@@ -238,15 +178,15 @@ export default function SyncParticipants() {
                                 ? 'bg-gray-400 cursor-not-allowed' 
                                 : 'bg-blue-600 hover:bg-blue-700 active:scale-95'
                             }
-                            text-white shadow-lg
+                            text-white shadow-lg flex-1 min-w-[200px]
                         `}
                     >
                         {getStatusIcon()}
-                        {isLoading ? 'Syncing...' : 'Smart Sync(Click Here)'}
+                        {isLoading ? 'Syncing...' : 'Sync Participants'}
                     </button>
                     
                     <button
-                        onClick={resetAndSync}
+                        onClick={() => startSync('full')}
                         disabled={isLoading}
                         className={`
                             flex items-center gap-2 px-6 py-3 rounded-lg font-medium transition-all
@@ -254,16 +194,16 @@ export default function SyncParticipants() {
                                 ? 'bg-gray-400 cursor-not-allowed' 
                                 : 'bg-red-600 hover:bg-red-700 active:scale-95'
                             }
-                            text-white shadow-lg
+                            text-white shadow-lg flex-1 min-w-[200px]
                         `}
                     >
                         <RotateCcw className={isLoading ? 'animate-spin' : ''} />
-                        {isLoading ? 'Resetting...' : 'Full Reset & Sync'}
+                        {isLoading ? 'Resetting...' : 'Force Full Resync'}
                     </button>
                 </div>
 
                 {/* Status Cards */}
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                     <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
                         <div className="flex items-center gap-2 text-blue-700 mb-1">
                             <Clock size={16} />
@@ -280,27 +220,17 @@ export default function SyncParticipants() {
                             <span className="font-medium">Processed</span>
                         </div>
                         <div className="text-green-900 text-sm">
-                            {syncStatus ? `${syncStatus.count}` : '-'}
+                            {syncStatus ? `${syncStatus.processed}` : '-'}
                         </div>
                     </div>
 
                     <div className="bg-purple-50 p-4 rounded-lg border border-purple-200">
                         <div className="flex items-center gap-2 text-purple-700 mb-1">
-                            <AlertCircle size={16} />
-                            <span className="font-medium">Total</span>
+                            <Database size={16} />
+                            <span className="font-medium">Total in DB</span>
                         </div>
                         <div className="text-purple-900 text-sm">
-                            {syncStatus ? `${syncStatus.totalParticipants}` : '-'}
-                        </div>
-                    </div>
-
-                    <div className="bg-orange-50 p-4 rounded-lg border border-orange-200">
-                        <div className="flex items-center gap-2 text-orange-700 mb-1">
-                            <RefreshCw size={16} />
-                            <span className="font-medium">Sync Type</span>
-                        </div>
-                        <div className="text-orange-900 text-sm">
-                            {syncStatus ? getSyncTypeDisplay(syncStatus.syncType) : '-'}
+                            {syncStatus ? `${syncStatus.dbCount || 'N/A'}` : '-'}
                         </div>
                     </div>
                 </div>
@@ -308,21 +238,21 @@ export default function SyncParticipants() {
                 {/* Detailed Stats */}
                 {syncStatus && (
                     <div className="mb-6 grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
+                            <div className="text-blue-700 text-sm font-medium">API Count</div>
+                            <div className="text-blue-900 text-lg font-bold">{syncStatus.apiCount || 'N/A'}</div>
+                        </div>
                         <div className="bg-green-50 p-3 rounded-lg border border-green-200">
                             <div className="text-green-700 text-sm font-medium">New</div>
-                            <div className="text-green-900 text-lg font-bold">{syncStatus.newParticipants}</div>
-                        </div>
-                        <div className="bg-blue-50 p-3 rounded-lg border border-blue-200">
-                            <div className="text-blue-700 text-sm font-medium">Updated</div>
-                            <div className="text-blue-900 text-lg font-bold">{syncStatus.updatedParticipants}</div>
+                            <div className="text-green-900 text-lg font-bold">{syncStatus.newParticipants || 0}</div>
                         </div>
                         <div className="bg-yellow-50 p-3 rounded-lg border border-yellow-200">
-                            <div className="text-yellow-700 text-sm font-medium">Skipped</div>
-                            <div className="text-yellow-900 text-lg font-bold">{syncStatus.skippedParticipants}</div>
+                            <div className="text-yellow-700 text-sm font-medium">Sync Type</div>
+                            <div className="text-yellow-900 text-lg font-bold">{getSyncTypeDisplay(syncStatus.syncType)}</div>
                         </div>
                         <div className="bg-red-50 p-3 rounded-lg border border-red-200">
                             <div className="text-red-700 text-sm font-medium">Failed</div>
-                            <div className="text-red-900 text-lg font-bold">{syncStatus.failedParticipants}</div>
+                            <div className="text-red-900 text-lg font-bold">{syncStatus.failed}</div>
                         </div>
                     </div>
                 )}
@@ -335,37 +265,49 @@ export default function SyncParticipants() {
                             <span className="font-medium">Error</span>
                         </div>
                         <p className="text-red-600">{error}</p>
+                        {(syncStatus?.failedUsernames?.length ?? 0) > 0 && (
+                            <div className="mt-2">
+                                <p className="text-red-700 text-sm font-medium">Failed Participants:</p>
+                                <p className="text-red-600 text-sm">{syncStatus?.failedUsernames?.join(', ')}</p>
+                            </div>
+                        )}
                     </div>
                 )}
 
                 {/* Success Display */}
-                {syncStatus && (
+                {syncStatus && !error && (
                     <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
                         <div className="flex items-center gap-2 text-green-700 mb-2">
                             <CheckCircle size={16} />
-                            <span className="font-medium">Sync Completed</span>
+                            <span className="font-medium">Sync Results</span>
                         </div>
                         <div className="text-green-600 space-y-1">
-                            <p>✅ Sync Type: {getSyncTypeDisplay(syncStatus.syncType)}</p>
-                            <p>📊 Total processed: {syncStatus.count} participants</p>
-                            <p>📈 Total participants: {syncStatus.totalParticipants}</p>
-                            <p>📍 Progress: {syncStatus.progress}</p>
-                            <p>💾 Database: {syncStatus.initialDBCount} → {syncStatus.finalDBCount}</p>
-                            <p>⏰ Completed at: {new Date(syncStatus.timestamp).toLocaleString()}</p>
-                            {syncStatus.failedUsernames && syncStatus.failedUsernames.length > 0 && (
-                                <p>⚠️ Failed usernames: {syncStatus.failedUsernames.join(', ')}</p>
+                            <p>📋 {syncStatus.message}</p>
+                            <p>📊 Processed: {syncStatus.processed} participants</p>
+                            {syncStatus.newParticipants && (
+                                <p>🆕 New participants: {syncStatus.newParticipants}</p>
+                            )}
+                            <p>📈 Total in database: {syncStatus.dbCount}</p>
+                            <p>🌐 API count: {syncStatus.apiCount}</p>
+                            {syncStatus.failed > 0 && (
+                                <p>❌ Failed: {syncStatus.failed} participants</p>
                             )}
                         </div>
                     </div>
                 )}
 
                 {/* Live Logs */}
-                {logs.length > 0 && (
-                    <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
-                        <div className="bg-gray-100 px-4 py-2 border-b border-gray-200">
-                            <h3 className="font-medium text-gray-700">Sync Logs</h3>
-                        </div>
-                        <div className="p-4 max-h-64 overflow-y-auto">
+                <div className="bg-gray-50 rounded-lg border border-gray-200 overflow-hidden">
+                    <div className="bg-gray-100 px-4 py-2 border-b border-gray-200">
+                        <h3 className="font-medium text-gray-700 flex items-center gap-2">
+                            <RefreshCw size={16} />
+                            Sync Logs
+                        </h3>
+                    </div>
+                    <div className="p-4 max-h-64 overflow-y-auto">
+                        {logs.length === 0 ? (
+                            <p className="text-gray-500 text-sm">No logs yet. Sync operations will appear here.</p>
+                        ) : (
                             <div className="space-y-2">
                                 {logs.map((log, index) => (
                                     <div key={index} className="flex items-start gap-2 text-sm">
@@ -386,21 +328,21 @@ export default function SyncParticipants() {
                                     </div>
                                 ))}
                             </div>
-                        </div>
+                        )}
                     </div>
-                )}
+                </div>
 
-                {/* Instructions */}
-                {/* <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
-                    <h3 className="font-medium text-blue-800 mb-2">How it works:</h3>
+                {/* Help Section */}
+                <div className="mt-6 p-4 bg-blue-50 rounded-lg border border-blue-200">
+                    <h3 className="font-medium text-blue-800 mb-2">Sync Operations:</h3>
                     <ul className="text-blue-700 text-sm space-y-1">
-                        <li><strong>Smart Sync:</strong> Only processes new or changed participants (recommended)</li>
-                        <li><strong>Full Reset & Sync:</strong> Resets sync state and processes all participants from scratch</li>
-                        <li>• Automatically detects new participants, missing data, and updates</li>
-                        <li>• Maintains sync state to resume interrupted syncs</li>
-                        <li>• Provides detailed logging and progress tracking</li>
+                        <li><strong>Sync Participants:</strong> Smart sync that only processes new or changed participants</li>
+                        <li><strong>Force Full Resync:</strong> Resets sync state and processes all participants from scratch</li>
+                        <li>• The system automatically detects missing participants and updates</li>
+                        <li>• Failed syncs can be retried without data loss</li>
+                        <li>• Detailed logs help track sync progress and issues</li>
                     </ul>
-                </div> */}
+                </div>
             </div>
         </div>
     );
